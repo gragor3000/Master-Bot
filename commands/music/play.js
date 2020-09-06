@@ -1,9 +1,20 @@
-const { Command } = require('discord.js-commando');
-const { MessageEmbed } = require('discord.js');
+const {
+  Command
+} = require('discord.js-commando');
+const {
+  MessageEmbed
+} = require('discord.js');
 const Youtube = require('simple-youtube-api');
 const ytdl = require('ytdl-core');
-const { youtubeAPI } = require('../../config.json');
+const {
+  youtubeAPI
+} = require('../../config.json');
 const youtube = new Youtube(youtubeAPI);
+var SpotifyWebApi = require('spotify-web-api-node');
+var spotifyApi = new SpotifyWebApi({
+  clientId: 'deffd5cfbba34ca2b7f97c6771e248e8',
+  clientSecret: '48e834ef583c478abc3e4eceb60d0181',
+});
 
 module.exports = class PlayCommand extends Command {
   constructor(client) {
@@ -19,24 +30,210 @@ module.exports = class PlayCommand extends Command {
         usages: 2,
         duration: 5
       },
-      args: [
-        {
-          key: 'query',
-          prompt: 'What song or playlist would you like to listen to?',
-          type: 'string',
-          validate: function(query) {
-            return query.length > 0 && query.length < 200;
-          }
+      args: [{
+        key: 'query',
+        prompt: 'What song or playlist would you like to listen to?',
+        type: 'string',
+        validate: function (query) {
+          return query.length > 0 && query.length < 200;
         }
-      ]
+      }]
     });
   }
 
-  async run(message, { query }) {
+  async run(message, {
+    query
+  }) {
+    // Set an access token.
+    // This is required as Spotify implemented a new auth flow since May 2017.
+    // See https://developer.spotify.com/news-stories/2017/01/27/removing-unauthenticated-calls-to-the-web-api/
+    spotifyApi.clientCredentialsGrant()
+      .then(function (data) {
+        console.log('The access token expires in ' + data.body['expires_in']);
+        console.log('The access token is ' + data.body['access_token']);
+
+        // Save the access token so that it's used in future calls
+        spotifyApi.setAccessToken(data.body['access_token']);
+      }, function (err) {
+        console.log('Something went wrong when retrieving an access token', err.message);
+      }).then(() => this.executeSong(message, {
+        query
+      }));
+  }
+
+  static playSong(queue, message) {
+    const classThis = this; // use classThis instead of 'this' because of lexical scope below
+    queue[0].voiceChannel
+      .join()
+      .then(function (connection) {
+        const dispatcher = connection
+          .play(
+            ytdl(queue[0].url, {
+              quality: 'highestaudio',
+              highWaterMark: 1 << 25
+            })
+          )
+          .on('start', function () {
+            message.guild.musicData.songDispatcher = dispatcher;
+            dispatcher.setVolume(message.guild.musicData.volume);
+            const videoEmbed = new MessageEmbed()
+              .setThumbnail(queue[0].thumbnail)
+              .setColor('#e9f931')
+              .addField('Now Playing:', queue[0].title)
+              .addField('Duration:', queue[0].duration)
+              .setFooter(
+                `Requested by ${queue[0].memberDisplayName}`,
+                queue[0].memberAvatar
+              );
+            if (queue[1]) videoEmbed.addField('Next Song:', queue[1].title);
+            message.say(videoEmbed);
+            message.guild.musicData.nowPlaying = queue[0];
+            queue.shift();
+            return;
+          })
+          .on('finish', function () {
+            queue = message.guild.musicData.queue;
+            if (queue.length >= 1) {
+              classThis.playSong(queue, message);
+              return;
+            } else {
+              message.guild.musicData.isPlaying = false;
+              message.guild.musicData.nowPlaying = null;
+              message.guild.musicData.songDispatcher = null;
+              if (message.guild.me.voice.channel) {
+                message.guild.me.voice.channel.leave();
+                return;
+              }
+            }
+          })
+          .on('error', function (e) {
+            message.say('Cannot play song');
+            console.error(e);
+            message.guild.musicData.queue.length = 0;
+            message.guild.musicData.isPlaying = false;
+            message.guild.musicData.nowPlaying = null;
+            message.guild.musicData.songDispatcher = null;
+            message.guild.me.voice.channel.leave();
+            return;
+          });
+      })
+      .catch(function () {
+        message.say('I have no permission to join your channel!');
+        message.guild.musicData.queue.length = 0;
+        message.guild.musicData.isPlaying = false;
+        message.guild.musicData.nowPlaying = null;
+        message.guild.musicData.songDispatcher = null;
+        if (message.guild.me.voice.channel) {
+          message.guild.me.voice.channel.leave();
+        }
+        return;
+      });
+  }
+  static constructSongObj(video, voiceChannel, user) {
+    let duration = this.formatDuration(video.duration);
+    if (duration == '00:00') duration = 'Live Stream';
+    return {
+      url: `https://www.youtube.com/watch?v=${video.raw.id}`,
+      title: video.title,
+      rawDuration: video.duration,
+      duration,
+      thumbnail: video.thumbnails.high.url,
+      voiceChannel,
+      memberDisplayName: user.username,
+      memberAvatar: user.avatarURL('webp', false, 16)
+    };
+  }
+  // prettier-ignore
+  static formatDuration(durationObj) {
+    const duration = `${durationObj.hours ? (durationObj.hours + ':') : ''}${
+      durationObj.minutes ? durationObj.minutes : '00'
+    }:${
+      (durationObj.seconds < 10)
+        ? ('0' + durationObj.seconds)
+        : (durationObj.seconds
+        ? durationObj.seconds
+        : '00')
+    }`;
+    return duration;
+  }
+
+  
+  getSpotifySongTitle(query) {
+    var title = "";
+
+    return new Promise((resolve, reject) => {
+      spotifyApi.getTrack(query).then(function (data) {
+          console.log('Track ', data.body);
+
+          title = data.body.name;
+
+          resolve(title);
+        }),
+        function (err) {
+          console.error(err);
+        };
+    });
+  }
+
+  async playSongFromTitle(songTitle, message, voiceChannel) {
+    // if user provided a song/video name
+    const videos = await youtube.searchVideos(songTitle, 1).catch(async function () {
+      await message.say(
+        'There was a problem searching the video you requested :('
+      );
+      return;
+    });
+    if (!videos) {
+      message.say(
+        `I had some trouble finding what you were looking for, please try again or be more specific`
+      );
+      return;
+    }
+    const vidNameArr = [];
+    for (let i = 0; i < videos.length; i++) {
+      vidNameArr.push(`${i + 1}: ${videos[i].title}`);
+    }
+
+    try {
+      youtube
+        .getVideoByID(videos[0].id)
+        .then(function (video) {
+          message.guild.musicData.queue.push(
+            PlayCommand.constructSongObj(
+              video,
+              voiceChannel,
+              message.member.user
+            )
+          );
+          if (message.guild.musicData.isPlaying == false) {
+            message.guild.musicData.isPlaying = true;
+            PlayCommand.playSong(message.guild.musicData.queue, message);
+          } else if (message.guild.musicData.isPlaying == true) {
+            message.say(`${video.title} added to queue`);
+            return;
+          }
+        })
+        .catch(function () {
+          message.say(
+            'An error has occured when trying to get the video ID from youtube'
+          );
+          return;
+        });
+    } catch {
+      message.say(
+        'Please try again and enter a number between 1 and 5 or exit'
+      );
+      return;
+    }
+  }
+
+  async executeSong(message, {
+    query
+  }) {
     const voiceChannel = message.member.voice.channel;
     if (!voiceChannel) {
       message.say('Join a channel and try again');
-      return;
+      //return;
     }
 
     if (message.guild.triviaData.isTriviaRunning == true) {
@@ -50,12 +247,12 @@ module.exports = class PlayCommand extends Command {
         /^(?!.*\?.*\bv=)https:\/\/www\.youtube\.com\/.*\?.*\blist=.*$/
       )
     ) {
-      const playlist = await youtube.getPlaylist(query).catch(function() {
+      const playlist = await youtube.getPlaylist(query).catch(function () {
         message.say('Playlist is either private or it does not exist!');
         return;
       });
       // add 10 as an argument in getVideos() if you choose to limit the queue
-      const videosArr = await playlist.getVideos().catch(function() {
+      const videosArr = await playlist.getVideos().catch(function () {
         message.say(
           'There was a problem getting one of the videos in the playlist!'
         );
@@ -113,7 +310,7 @@ module.exports = class PlayCommand extends Command {
         .replace(/(>|<)/gi, '')
         .split(/(vi\/|v=|\/v\/|youtu\.be\/|\/embed\/)/);
       const id = query[2].split(/[^0-9a-z_\-]/i)[0];
-      const video = await youtube.getVideoByID(id).catch(function() {
+      const video = await youtube.getVideoByID(id).catch(function () {
         message.say('There was a problem getting the video you provided!');
         return;
       });
@@ -145,9 +342,16 @@ module.exports = class PlayCommand extends Command {
         return;
       }
     }
+    if(query.startsWith("https://open.spotify.com/track/"))
+    {
+      const songId = query.split("/")[4];
+      await this.getSpotifySongTitle(songId).then((title) => this.playSongFromTitle(title, message, voiceChannel));
+      return;
+    }
+    
 
     // if user provided a song/video name
-    const videos = await youtube.searchVideos(query, 5).catch(async function() {
+    const videos = await youtube.searchVideos(query, 5).catch(async function () {
       await message.say(
         'There was a problem searching the video you requested :('
       );
@@ -173,19 +377,20 @@ module.exports = class PlayCommand extends Command {
       .addField('Song 4', vidNameArr[3])
       .addField('Song 5', vidNameArr[4])
       .addField('Exit', 'exit');
-    var songEmbed = await message.channel.send({ embed });
+    var songEmbed = await message.channel.send({
+      embed
+    });
     message.channel
       .awaitMessages(
-        function(msg) {
+        function (msg) {
           return (msg.content > 0 && msg.content < 6) || msg.content === 'exit';
-        },
-        {
+        }, {
           max: 1,
           time: 60000,
           errors: ['time']
         }
       )
-      .then(function(response) {
+      .then(function (response) {
         const videoIndex = parseInt(response.first().content);
         if (response.first().content === 'exit') {
           songEmbed.delete();
@@ -193,7 +398,7 @@ module.exports = class PlayCommand extends Command {
         }
         youtube
           .getVideoByID(videos[videoIndex - 1].id)
-          .then(function(video) {
+          .then(function (video) {
             // // can be uncommented if you don't want the bot to play live streams
             // if (video.raw.snippet.liveBroadcastContent === 'live') {
             //   songEmbed.delete();
@@ -234,7 +439,7 @@ module.exports = class PlayCommand extends Command {
               return;
             }
           })
-          .catch(function() {
+          .catch(function () {
             if (songEmbed) {
               songEmbed.delete();
             }
@@ -244,7 +449,7 @@ module.exports = class PlayCommand extends Command {
             return;
           });
       })
-      .catch(function() {
+      .catch(function () {
         if (songEmbed) {
           songEmbed.delete();
         }
@@ -253,100 +458,5 @@ module.exports = class PlayCommand extends Command {
         );
         return;
       });
-  }
-  static playSong(queue, message) {
-    const classThis = this; // use classThis instead of 'this' because of lexical scope below
-    queue[0].voiceChannel
-      .join()
-      .then(function(connection) {
-        const dispatcher = connection
-          .play(
-            ytdl(queue[0].url, {
-              quality: 'highestaudio',
-              highWaterMark: 1 << 25
-            })
-          )
-          .on('start', function() {
-            message.guild.musicData.songDispatcher = dispatcher;
-            dispatcher.setVolume(message.guild.musicData.volume);
-            const videoEmbed = new MessageEmbed()
-              .setThumbnail(queue[0].thumbnail)
-              .setColor('#e9f931')
-              .addField('Now Playing:', queue[0].title)
-              .addField('Duration:', queue[0].duration)
-              .setFooter(
-                `Requested by ${queue[0].memberDisplayName}`,
-                queue[0].memberAvatar
-              );
-            if (queue[1]) videoEmbed.addField('Next Song:', queue[1].title);
-            message.say(videoEmbed);
-            message.guild.musicData.nowPlaying = queue[0];
-            queue.shift();
-            return;
-          })
-          .on('finish', function() {
-            queue = message.guild.musicData.queue;
-            if (queue.length >= 1) {
-              classThis.playSong(queue, message);
-              return;
-            } else {
-              message.guild.musicData.isPlaying = false;
-              message.guild.musicData.nowPlaying = null;
-              message.guild.musicData.songDispatcher = null;
-              if (message.guild.me.voice.channel) {
-                message.guild.me.voice.channel.leave();
-                return;
-              }
-            }
-          })
-          .on('error', function(e) {
-            message.say('Cannot play song');
-            console.error(e);
-            message.guild.musicData.queue.length = 0;
-            message.guild.musicData.isPlaying = false;
-            message.guild.musicData.nowPlaying = null;
-            message.guild.musicData.songDispatcher = null;
-            message.guild.me.voice.channel.leave();
-            return;
-          });
-      })
-      .catch(function() {
-        message.say('I have no permission to join your channel!');
-        message.guild.musicData.queue.length = 0;
-        message.guild.musicData.isPlaying = false;
-        message.guild.musicData.nowPlaying = null;
-        message.guild.musicData.songDispatcher = null;
-        if (message.guild.me.voice.channel) {
-          message.guild.me.voice.channel.leave();
-        }
-        return;
-      });
-  }
-  static constructSongObj(video, voiceChannel, user) {
-    let duration = this.formatDuration(video.duration);
-    if (duration == '00:00') duration = 'Live Stream';
-    return {
-      url: `https://www.youtube.com/watch?v=${video.raw.id}`,
-      title: video.title,
-      rawDuration: video.duration,
-      duration,
-      thumbnail: video.thumbnails.high.url,
-      voiceChannel,
-      memberDisplayName: user.username,
-      memberAvatar: user.avatarURL('webp', false, 16)
-    };
-  }
-  // prettier-ignore
-  static formatDuration(durationObj) {
-    const duration = `${durationObj.hours ? (durationObj.hours + ':') : ''}${
-      durationObj.minutes ? durationObj.minutes : '00'
-    }:${
-      (durationObj.seconds < 10)
-        ? ('0' + durationObj.seconds)
-        : (durationObj.seconds
-        ? durationObj.seconds
-        : '00')
-    }`;
-    return duration;
   }
 };
