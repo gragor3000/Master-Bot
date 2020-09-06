@@ -157,7 +157,6 @@ module.exports = class PlayCommand extends Command {
     return duration;
   }
 
-  
   getSpotifySongTitle(query) {
     var title = "";
 
@@ -166,6 +165,10 @@ module.exports = class PlayCommand extends Command {
           console.log('Track ', data.body);
 
           title = data.body.name;
+
+          data.body.artists.forEach(artist => {
+            title += " " + artist.name; 
+          });
 
           resolve(title);
         }),
