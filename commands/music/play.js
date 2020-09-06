@@ -12,8 +12,8 @@ const {
 const youtube = new Youtube(youtubeAPI);
 var SpotifyWebApi = require('spotify-web-api-node');
 var spotifyApi = new SpotifyWebApi({
-  clientId: 'deffd5cfbba34ca2b7f97c6771e248e8',
-  clientSecret: '48e834ef583c478abc3e4eceb60d0181',
+  clientId: '',
+  clientSecret: '',
 });
 
 module.exports = class PlayCommand extends Command {
